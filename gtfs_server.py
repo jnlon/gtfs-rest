@@ -235,6 +235,23 @@ def route_locate(table):
 
 	return json_response(sql_query(sql, g.db, params))
 
+@app.route('/api/route/<route_id>/geojson')
+def route_geojson(route_id):
+	api_assert('shapes' in TABLES, Error.NO_TABLE)
+
+	sql = 'SELECT s.* FROM trips t INNER JOIN shapes s ON s.shape_id = t.shape_id WHERE t.route_id = :route_id'
+	params = {'route_id': route_id}
+	cursor = sql_query(sql, g.db, params)
+
+	coordinates = []
+	for row in cursor:
+		coordinates.append([row['shape_pt_lon'], row['shape_pt_lat']])
+
+	return json_response({
+		'type': 'Feature',
+		'geometry': { 'type': 'LineString', 'coordinates': coordinates }
+	})
+
 @app.errorhandler(APIError)
 @app.errorhandler(ParamError)
 def handle_error(error):
