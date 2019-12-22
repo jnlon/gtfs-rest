@@ -190,23 +190,47 @@ class GTFSObject:
 		self.file_name = name + ".txt"
 		self.create_sql = create_sql
 
-def create_gtfs_table(file, table_name, sql_create_schema, cursor):
+def create_gtfs_table(file, table_name, sql_create_schema, conn):
 	# Drop old and create new table
-	cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
-	cursor.execute(sql_create_schema)
+	conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+	conn.execute(sql_create_schema)
+
+	# get a list of columns in this table from the create_table schema.
+	# We check the CSV column headers against this list later to check for non-existant fields
+	column_names_sql = f"select name from pragma_table_info('{table_name}')"
+	expected_columns = [row[0] for row in conn.execute(column_names_sql).fetchall()]
 
 	# create the csv reader
 	reader = csv.reader(file)
 
-	# build the correct sql insert string for this table
-	schema = next(reader)
-	column_schema = ",".join([re.sub(r'\W+', '', e) for e in schema])
-	value_template = ("?," * len(schema)).rstrip(",")
-	sql_insert = f"INSERT INTO {table_name} ({column_schema}) VALUES ({value_template})"
+	# get the comma-separated column names from the csv file (first line)
+	# and trim excess whitespace surrounding each column
+	original_columns = next(reader)
+	original_columns = [re.sub(r'\W+', '', e) for e in original_columns]
 
-	# for every line in csv file, insert it into database
-	for line in reader:
-		cursor.execute(sql_insert, line)
+	# make another copy of the original column names
+	csv_columns = original_columns.copy()
+
+	# verify the csv column names match column names from the CREATE TABLE statement
+	# remove any invalid columns from csv_columns
+	for column in csv_columns:
+		if not column in expected_columns:
+			print(f"WARNING: Table '{table_name}' contains invalid column '{column}', skipping import for this column")
+			csv_columns.remove(column)
+
+	# make a list of valid CSV indices
+	valid_indices = [original_columns.index(c) for c in csv_columns]
+
+	# build the correct sql insert string for this table
+	value_template = ("?," * len(csv_columns)).rstrip(",")
+	valid_csv_columns = ",".join(csv_columns)
+	sql_insert = f"INSERT INTO {table_name} ({valid_csv_columns}) VALUES ({value_template})"
+
+	# for every line in csv file insert it as a row into the database,
+	# excluding columns that do not exist in the table schema
+	for csv_line in reader:
+		valid_csv_line = [csv_line[i] for i in valid_indices]
+		conn.execute(sql_insert, valid_csv_line)
 
 	print(f"Inserted {reader.line_num} rows into table '{table_name}'")
 
