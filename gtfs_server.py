@@ -3,6 +3,7 @@
 import sqlite3
 import json
 import math
+import time
 
 ###
 ### Flask Stuff
@@ -31,17 +32,13 @@ def teardown_request(exception):
 ###
 
 def json_response(obj):
-	return Response(json.dumps(obj), mimetype="application/json")
+	headers = {}
+	if app.env == 'development':
+		headers = {"Access-Control-Allow-Origin": "*"}
+	return Response(json.dumps(obj), mimetype="application/json", headers=headers)
 
 def error_json_response(message):
 	return json_response({"error": message})
-
-def kilometer_to_lat(km):
-	return (1 / 110.574) * km
-
-def kilometer_to_lon(lat, km):
-	lat_radians = (lat * math.pi) / 180
-	return (1 / (111.320 * math.cos(lat_radians))) * km
 
 ###
 ### Verb-SQL Helpers
@@ -136,15 +133,16 @@ def api_assert(test, msg):
 		raise APIError(msg)
 
 def get_list_params():
-	count = get_param_numeric('count', int, 0, 100, 25)
+	count = get_param_numeric('count', int, 0, 300, 25)
 	page = get_param_numeric('page', int, 0, float("+inf"), 0)
 	return (count, page)
 
 def get_locate_params():
-	lat = get_param_numeric('lat', float, -90.0, 90.0, None)
-	lon = get_param_numeric('lon', float, -180.0, 180.0, None)
-	km_range = get_param_numeric('range', int, 0, 100, 25)
-	return (lat, lon, km_range)
+	high_lat = get_param_numeric('high_lat', float, -90.0, 90.0, None)
+	low_lat = get_param_numeric('low_lat', float, -90.0, 90.0, None)
+	high_lon = get_param_numeric('high_lon', float, -180.0, 180.0, None)
+	low_lon = get_param_numeric('low_lon', float, -180.0, 180.0, None)
+	return (high_lat, low_lat, high_lon, low_lon)
 
 @app.route('/api/<table>/find/<search>')
 def route_find(table, search):
@@ -173,6 +171,17 @@ def route_id(table, id_value):
 	params = {"id": id_value}
 
 	return json_response(sql_query(sql, g.db, params))
+
+@app.route('/api/routes/list')
+def route_routes_list():
+	sql = '''
+	SELECT DISTINCT
+		r.route_id, r.route_short_name, r.route_long_name, r.route_desc,
+		t.trip_headsign, t.shape_id, t.direction_id
+	FROM routes r
+	INNER JOIN trips t ON r.route_id = t.route_id
+	ORDER BY r.route_short_name, t.trip_headsign, r.route_id'''
+	return json_response(sql_query(sql, g.db))
 
 @app.route('/api/<table>/list')
 def route_list(table):
@@ -213,17 +222,15 @@ def route_locate(table):
 	api_assert(table in TABLES, Error.NO_TABLE)
 	api_assert('locate' in VERBS[table], Error.NO_VERB)
 
-	for param in ['lat', 'lon', 'range']:
+	for param in ['high_lat', 'low_lat', 'high_lon', 'low_lon']:
 		api_assert(param in request.args, Error.NO_PARAM(param))
 
-	(lat, lon, km_range) = get_locate_params()
+	(high_lat, low_lat, high_lon, low_lon) = get_locate_params()
 	(count, page) = get_list_params()
 
 	params = {
-		"high_lat": lat + kilometer_to_lat(km_range),
-		"high_lon": lon + kilometer_to_lon(lat, km_range),
-		"low_lat": lat - kilometer_to_lat(km_range),
-		"low_lon": lon - kilometer_to_lon(lat, km_range),
+		"high_lat": high_lat, "low_lat": low_lat,
+		"high_lon": high_lon, "low_lon": low_lon,
 		"limit": count,
 		"offset": page * count
 	}
@@ -235,13 +242,60 @@ def route_locate(table):
 
 	return json_response(sql_query(sql, g.db, params))
 
-@app.route('/api/route/<route_id>/geojson')
-def route_geojson(route_id):
+
+@app.route('/api/stop_times/<stop_id>/schedule')
+def route_schedule(stop_id):
+	yyyymmdd = request.args.get('date', None)
+	if yyyymmdd is None:
+		return json_response([])
+
+	weekday_index = 0
+	try:
+		weekday_index = time.strptime(yyyymmdd, '%Y%m%d').tm_wday
+	except ValueError:
+		return json_response([])
+
+	weekday = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'][weekday_index]
+
+	sql="""
+	SELECT st.arrival_time, t.trip_headsign, r.route_short_name, r.route_long_name
+	FROM trips t
+	INNER JOIN stop_times st ON st.trip_id = t.trip_id
+	INNER JOIN routes r ON t.route_id = r.route_id
+	WHERE
+		st.stop_id = :stop_id AND 
+		t.service_id IN
+			(SELECT c.service_id FROM calendar c
+			WHERE
+				c.end_date > :yyyymmdd
+				AND c.{0} = 1
+				AND NOT :yyyymmdd IN (SELECT date FROM calendar_dates cd WHERE cd.exception_type = 2)
+			UNION
+			SELECT service_id FROM calendar_dates
+			WHERE
+				date = :yyyymmdd AND exception_type = 1)
+	ORDER BY st.arrival_time
+	""".format(weekday)
+
+	params = {'yyyymmdd': yyyymmdd, 'stop_id': stop_id}
+	return json_response(sql_query(sql, g.db, params))
+
+@app.route('/api/route/<shape_id>/geojson')
+def route_geojson(shape_id):
 	api_assert('shapes' in TABLES, Error.NO_TABLE)
 
-	sql = 'SELECT s.* FROM trips t INNER JOIN shapes s ON s.shape_id = t.shape_id WHERE t.route_id = :route_id'
-	params = {'route_id': route_id}
+	sql = '''SELECT s.* FROM shapes s
+	WHERE s.shape_id = :shape_id
+	ORDER BY s.shape_pt_sequence'''
+	params = {'shape_id': shape_id}
 	cursor = sql_query(sql, g.db, params)
+
+#	sql = 'SELECT DISTINCT s.*
+#	FROM trips t INNER JOIN shapes s ON s.shape_id = t.shape_id 
+#	WHERE t.route_id = :route_id
+#	ORDER BY s.shape_id, s.shape_pt_sequence'
+#	params = {'route_id': route_id}
+#	cursor = sql_query(sql, g.db, params)
 
 	coordinates = []
 	for row in cursor:
@@ -251,6 +305,11 @@ def route_geojson(route_id):
 		'type': 'Feature',
 		'geometry': { 'type': 'LineString', 'coordinates': coordinates }
 	})
+
+
+@app.route('/api')
+def route_api():
+	return json_response({'success': 'API Running'})
 
 @app.errorhandler(APIError)
 @app.errorhandler(ParamError)
