@@ -184,24 +184,19 @@ CREATE TABLE feed_info(
 	feed_contact_url TEXT
 )"""
 
-class GTFSObject:
-	def __init__(self, name, create_sql):
-		self.table_name = name
-		self.file_name = name + ".txt"
-		self.create_sql = create_sql
-
-def create_gtfs_table(file, table_name, sql_create_schema, conn):
+def create_gtfs_table(table_name, create_sql, conn):
 	# Drop old and create new table
 	conn.execute(f"DROP TABLE IF EXISTS {table_name}")
-	conn.execute(sql_create_schema)
+	conn.execute(create_sql)
 
+def insert_gtfs_table_rows(zipstream, table_name, conn):
 	# get a list of columns in this table from the create_table schema.
 	# We check the CSV column headers against this list later to check for non-existant fields
-	column_names_sql = f"select name from pragma_table_info('{table_name}')"
+	column_names_sql = f"SELECT name FROM pragma_table_info('{table_name}')"
 	expected_columns = [row[0] for row in conn.execute(column_names_sql).fetchall()]
 
 	# create the csv reader
-	reader = csv.reader(file)
+	reader = csv.reader(zipstream)
 
 	# get the comma-separated column names from the csv file (first line)
 	# and trim excess whitespace surrounding each column
@@ -232,12 +227,14 @@ def create_gtfs_table(file, table_name, sql_create_schema, conn):
 		valid_csv_line = [csv_line[i] for i in valid_indices]
 		conn.execute(sql_insert, valid_csv_line)
 
-	print(f"Inserted {reader.line_num} rows into table '{table_name}'")
+	# return number of rows from from CSV file
+	return reader.line_num
 
-def create_and_insert(zipfile, go, conn):
-	file_in_zip = zipfile.open(go.file_name, 'r')
-	with io.TextIOWrapper(file_in_zip, encoding='UTF-8') as f:
-		create_gtfs_table(f, go.table_name, go.create_sql, conn)
+def insert_rows_from_zip(zipfile, table_name, table_file, create_sql, conn):
+	file_in_zip = zipfile.open(table_file, 'r')
+	with io.TextIOWrapper(file_in_zip, encoding='UTF-8') as zipstream:
+		# Insert rows from CSV file contained in the zipped archive
+		return insert_gtfs_table_rows(zipstream, table_name, conn)
 
 def main():
 	# setup CLI arguments
@@ -257,56 +254,56 @@ def main():
 		print('Error opening gtfs archive:', e)
 		return 1
 
-	gtfs_objects = [
+	gtfs_table_pairs = [
 		# required files are agency, stops, routes, trips, stop_times
-		GTFSObject("agency", SQL_CREATE_AGENCY),
-		GTFSObject("stops", SQL_CREATE_STOPS),
-		GTFSObject("routes", SQL_CREATE_ROUTES),
-		GTFSObject("trips", SQL_CREATE_TRIPS),
-		GTFSObject("stop_times", SQL_CREATE_STOP_TIMES),
+		("agency", SQL_CREATE_AGENCY),
+		("stops", SQL_CREATE_STOPS),
+		("routes", SQL_CREATE_ROUTES),
+		("trips", SQL_CREATE_TRIPS),
+		("stop_times", SQL_CREATE_STOP_TIMES),
 		# conditionally required are calendar, calendar_dates
-		GTFSObject("calendar", SQL_CREATE_CALENDAR),
-		GTFSObject("calendar_dates", SQL_CREATE_CALENDAR_DATES),
+		("calendar", SQL_CREATE_CALENDAR),
+		("calendar_dates", SQL_CREATE_CALENDAR_DATES),
 		# optional are fare_attributes, fare_rules, shapes, frequencies, transfers, pathways, levels, feed_info
-		GTFSObject("fare_attributes", SQL_CREATE_FARE_ATTRIBUTES),
-		GTFSObject("fare_rules", SQL_CREATE_FARE_RULES),
-		GTFSObject("shapes", SQL_CREATE_SHAPES),
-		GTFSObject("frequencies", SQL_CREATE_FREQUENCIES),
-		GTFSObject("transfers", SQL_CREATE_TRANSFERS),
-		GTFSObject("pathways", SQL_CREATE_PATHWAYS),
-		GTFSObject("levels", SQL_CREATE_LEVELS),
-		GTFSObject("feed_info", SQL_CREATE_FEED_INFO)
+		("fare_attributes", SQL_CREATE_FARE_ATTRIBUTES),
+		("fare_rules", SQL_CREATE_FARE_RULES),
+		("shapes", SQL_CREATE_SHAPES),
+		("frequencies", SQL_CREATE_FREQUENCIES),
+		("transfers", SQL_CREATE_TRANSFERS),
+		("pathways", SQL_CREATE_PATHWAYS),
+		("levels", SQL_CREATE_LEVELS),
+		("feed_info", SQL_CREATE_FEED_INFO)
 	]
 
 	# Perform some basic validation of the zipfile
-	archive_files = gtfs_zip.namelist()
+	archive_file_list = gtfs_zip.namelist()
 	required_gtfs_files = ['agency.txt', 'stops.txt', 'routes.txt', 'trips.txt', 'stop_times.txt']
-	valid_gtfs_files = [go.file_name for go in gtfs_objects]
+	valid_gtfs_files = [pair[0] + '.txt' for pair in gtfs_table_pairs]
 
 	# Are the minmum-required files present? If not, abort
 	for required_file in required_gtfs_files:
-		if not required_file in archive_files:
+		if not required_file in archive_file_list:
 			print('ERROR: This zip is missing a required GTFS file:', required_file)
 			print('This is not a valid GTFS archive!')
 			return 1
 
-	# Are any extra files present? If not, print warning
-	for archive_file in archive_files:
+	for archive_file in archive_file_list:
 		if not archive_file in valid_gtfs_files:
 			print('WARNING: Unknown file in archive:', archive_file)
 
-	# Create a list of files to import
-	files_to_import = [af for af in archive_files if af in valid_gtfs_files]
-
-	# List the files to be imported
-	print('Importing files:')
-	for archive_file in files_to_import:
-		print('\t', archive_file)
-
 	# Create db tables and insert rows from archive
-	for go in gtfs_objects:
-		if go.file_name in files_to_import:
-			create_and_insert(gtfs_zip, go, conn)
+	for pair in gtfs_table_pairs:
+		table_name = pair[0]
+		table_file = table_name + '.txt'
+		create_sql = pair[1]
+		# create the table
+		print('::', table_name)
+		create_gtfs_table(table_name, create_sql, conn);
+		# if the zip archive contains a valid gtfs file
+		if table_file in archive_file_list:
+			# insert rows from the zip CSV file
+			rows_read = insert_rows_from_zip(gtfs_zip, table_name, table_file, create_sql, conn)
+			print('Inserted', rows_read, 'rows into', table_name)
 	
 	# Cleanup and exit
 	gtfs_zip.close()
