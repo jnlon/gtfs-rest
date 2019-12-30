@@ -172,15 +172,28 @@ def route_id(table, id_value):
 
 	return json_response(sql_query(sql, g.db, params))
 
+@app.route('/api/stops/list')
+def route_stops_list():
+
+	route_id = request.args.get('route_id', None)
+	if route_id == None:
+		return route_list('stops')
+
+	sql = '''
+	SELECT DISTINCT s.*
+	FROM trips t
+		INNER JOIN stop_times st ON t.trip_id = st.trip_id
+		INNER JOIN stops s ON s.stop_id = st.stop_id
+	WHERE
+		t.route_id = :route_id
+	ORDER BY s.stop_id'''
+	params = {'route_id': route_id}
+
+	return json_response(sql_query(sql, g.db, params))
+
 @app.route('/api/routes/list')
 def route_routes_list():
-	sql = '''
-	SELECT DISTINCT
-		r.route_id, r.route_short_name, r.route_long_name, r.route_desc,
-		t.trip_headsign, t.shape_id, t.direction_id
-	FROM routes r
-	INNER JOIN trips t ON r.route_id = t.route_id
-	ORDER BY r.route_short_name, t.trip_headsign, r.route_id'''
+	sql = 'SELECT route_id, route_short_name, route_long_name FROM routes ORDER BY route_short_name, route_long_name'
 	return json_response(sql_query(sql, g.db))
 
 @app.route('/api/<table>/list')
@@ -249,6 +262,9 @@ def route_schedule(stop_id):
 	if yyyymmdd is None:
 		return json_response([])
 
+	# In case this is an ISO date in format %Y-%m%-d, remove the dashes
+	yyyymmdd = yyyymmdd.replace('-', '')
+
 	weekday_index = 0
 	try:
 		weekday_index = time.strptime(yyyymmdd, '%Y%m%d').tm_wday
@@ -260,8 +276,8 @@ def route_schedule(stop_id):
 	sql="""
 	SELECT st.arrival_time, t.trip_headsign, r.route_short_name, r.route_long_name
 	FROM trips t
-	INNER JOIN stop_times st ON st.trip_id = t.trip_id
-	INNER JOIN routes r ON t.route_id = r.route_id
+		INNER JOIN stop_times st ON st.trip_id = t.trip_id
+		INNER JOIN routes r ON t.route_id = r.route_id
 	WHERE
 		st.stop_id = :stop_id AND 
 		t.service_id IN
@@ -280,30 +296,36 @@ def route_schedule(stop_id):
 	params = {'yyyymmdd': yyyymmdd, 'stop_id': stop_id}
 	return json_response(sql_query(sql, g.db, params))
 
-@app.route('/api/route/<shape_id>/geojson')
-def route_geojson(shape_id):
-	api_assert('shapes' in TABLES, Error.NO_TABLE)
-
-	sql = '''SELECT s.* FROM shapes s
-	WHERE s.shape_id = :shape_id
-	ORDER BY s.shape_pt_sequence'''
+def create_geojson_feature(shape_id):
+	sql = '''SELECT * FROM shapes
+	WHERE shape_id = :shape_id
+	ORDER BY shape_id, shape_pt_sequence'''
 	params = {'shape_id': shape_id}
-	cursor = sql_query(sql, g.db, params)
 
-#	sql = 'SELECT DISTINCT s.*
-#	FROM trips t INNER JOIN shapes s ON s.shape_id = t.shape_id 
-#	WHERE t.route_id = :route_id
-#	ORDER BY s.shape_id, s.shape_pt_sequence'
-#	params = {'route_id': route_id}
-#	cursor = sql_query(sql, g.db, params)
+	cursor = sql_query(sql, g.db, params)
 
 	coordinates = []
 	for row in cursor:
 		coordinates.append([row['shape_pt_lon'], row['shape_pt_lat']])
 
-	return json_response({
+	return {
 		'type': 'Feature',
 		'geometry': { 'type': 'LineString', 'coordinates': coordinates }
+	}
+
+
+@app.route('/api/route/<route_id>/geojson')
+def route_geojson(route_id):
+	api_assert('shapes' in TABLES, Error.NO_TABLE)
+
+	sql = 'SELECT DISTINCT shape_id FROM trips WHERE route_id = :route_id'
+	params = {'route_id': route_id}
+	shape_ids = sql_query(sql, g.db, params)
+
+	# geojson data
+	return json_response({
+		'type': 'FeatureCollection',
+		'features': [create_geojson_feature(sid['shape_id']) for sid in shape_ids],
 	})
 
 
