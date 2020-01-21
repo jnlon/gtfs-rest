@@ -18,8 +18,7 @@ CREATE TABLE agency(
 	agency_phone TEXT,
 	agency_fare_url TEXT,
 	agency_email TEXT
-)
-"""
+)"""
 
 SQL_CREATE_STOPS = """
 CREATE TABLE stops(
@@ -51,8 +50,7 @@ CREATE TABLE routes(
 	route_color VARCHAR(6),
 	route_text_color VARCHAR(6),
 	route_sort_order TINYINT
-)
-"""
+)"""
 
 SQL_CREATE_TRIPS = """
 CREATE TABLE trips(
@@ -184,6 +182,18 @@ CREATE TABLE feed_info(
 	feed_contact_url TEXT
 )"""
 
+SQL_LIST_CREATE_INDEXES = [
+	('stops_index', 'CREATE INDEX stops_index ON stops(stop_code)'),
+	('trips_index', 'CREATE INDEX trips_index ON trips(trip_id, route_id, shape_id, service_id)'),
+	('stop_times_index', 'CREATE INDEX stop_times_index ON stop_times(trip_id, stop_id)'),
+	('shapes_index', 'CREATE INDEX shapes_index ON shapes(shape_id)'),
+]
+
+def create_index(index_name, create_sql, conn):
+	# Drop old index if exists
+	conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+	conn.execute(create_sql)
+
 def create_gtfs_table(table_name, create_sql, conn):
 	# Drop old and create new table
 	conn.execute(f"DROP TABLE IF EXISTS {table_name}")
@@ -304,7 +314,11 @@ def main():
 			# insert rows from the zip CSV file
 			rows_read = insert_rows_from_zip(gtfs_zip, table_name, table_file, create_sql, conn)
 			print('Inserted', rows_read, 'rows into', table_name)
-	
+
+	print(':: creating indexes')
+	for (index_name, crete_sql) in SQL_LIST_CREATE_INDEXES:
+		create_index(index_name, crete_sql, conn)
+
 	# Cleanup and exit
 	gtfs_zip.close()
 	conn.commit()
