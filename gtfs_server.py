@@ -76,10 +76,6 @@ def sql_query(sql, db, params={}):
 ### API Definitions
 ###
 
-# the tables that exist in the DB we are serving
-TABLE_NAMES = sql_query("SELECT name FROM sqlite_master WHERE type = 'table'", get_db())
-TABLES = [row['name'] for row in TABLE_NAMES]
-
 # dict of gtfs tables and their supported API verbs/actions
 VERBS = {
 	'agency': ['id', 'list'],
@@ -98,6 +94,9 @@ VERBS = {
 	'levels': ['id', 'list'],
 	'feed_info': ['fetch']
 }
+
+# List of GTFS tables
+TABLES = VERBS.keys()
 
 # the columns to search for tables that support find
 SEARCH_FIELDS = {
@@ -124,7 +123,7 @@ def get_param_numeric(key, type_fn, lower, upper, default):
 		value = type_fn(request.args.get(key, default))
 		return max(lower, min(value, upper))
 	except (ValueError, TypeError) as e:
-		raise ParamError("Invalid parameter value: " + e)
+		raise ParamError("Invalid parameter value: " + str(e))
 
 def api_assert(test, msg):
 	if type(test) is bool and test:
@@ -133,7 +132,7 @@ def api_assert(test, msg):
 		raise APIError(msg)
 
 def get_list_params():
-	count = get_param_numeric('count', int, 0, 300, 25)
+	count = get_param_numeric('count', int, 0, int(app.config['MAX_PAGE_SIZE']), 25)
 	page = get_param_numeric('page', int, 0, float("+inf"), 0)
 	return (count, page)
 
@@ -279,7 +278,7 @@ def route_schedule(stop_id):
 		INNER JOIN stop_times st ON st.trip_id = t.trip_id
 		INNER JOIN routes r ON t.route_id = r.route_id
 	WHERE
-		st.stop_id = :stop_id AND 
+		st.stop_id = :stop_id AND
 		t.service_id IN
 			(SELECT c.service_id FROM calendar c
 			WHERE
@@ -332,6 +331,18 @@ def route_geojson(route_id):
 @app.route('/api')
 def route_api():
 	return json_response({'success': 'API Running'})
+
+@app.route('/api/info')
+def route_api_info():
+	min_date = sql_query('SELECT min(start_date) as min_date FROM calendar UNION SELECT min(date) as min_date FROM calendar_dates ORDER BY min_date LIMIT 1', g.db)[0]['min_date']
+	max_date = sql_query('SELECT max(end_date) as max_date FROM calendar UNION SELECT max(date) as max_date FROM calendar_dates ORDER BY max_date DESC LIMIT 1', g.db)[0]['max_date']
+	avg_stop_location = sql_query('SELECT avg(stop_lat) AS lat, avg(stop_lon) AS lon FROM stops', g.db)[0]
+
+	return json_response({
+		'service_date_range': [min_date, max_date],
+		'default_location': {'lat': avg_stop_location['lat'], 'lon': avg_stop_location['lon'] },
+		'max_page_size': app.config['MAX_PAGE_SIZE']
+	})
 
 @app.errorhandler(APIError)
 @app.errorhandler(ParamError)
