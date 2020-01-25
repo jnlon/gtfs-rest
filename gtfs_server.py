@@ -96,7 +96,7 @@ VERBS = {
 	'stops': ['id', 'list', 'find', 'locate'],
 	'routes': ['id', 'list', 'find'],
 	'trips': ['id'],
-	'stop_times': ['list', 'find'],
+	'stop_times': ['list', 'find', 'schedule'],
 	'calendar': ['fetch'],
 	'calendar_dates': ['fetch'],
 	'fare_attributes': ['id', 'list'],
@@ -163,36 +163,46 @@ def get_locate_params() -> typing.Tuple:
 	low_lon = get_param_numeric('low_lon', float, -180.0, 180.0, None)
 	return (high_lat, low_lat, high_lon, low_lon)
 
-@app.route('/api/<table>/find/<search>')
-def route_find(table, search) -> Response:
-	"""Search a GTFS table on all applicable columns and return objects
-	matching the search term."""
-	api_assert(table in TABLES, Error.NO_TABLE)
-	api_assert('find' in VERBS[table], Error.NO_VERB)
+def create_geojson_feature(shape_id: str) -> typing.Dict:
+	"""Return a GeoJSON Feature object representing the GTFS shape
+	corresponding to the ID."""
 
-	search_fields = SEARCH_FIELDS[table]
-	where_clause = " OR ".join([f"{sf} LIKE '%'||:search||'%'" for sf in search_fields])
-	sql = f"SELECT * FROM {table} WHERE {where_clause} LIMIT :limit OFFSET :page"
+	sql = '''SELECT * FROM shapes
+	WHERE shape_id = :shape_id
+	ORDER BY shape_id, shape_pt_sequence'''
+	params = {'shape_id': shape_id}
+	cursor = sql_query(sql, g.db, params)
 
-	(count, page) = get_list_params()
-	params = {"limit": count, "offset": page * count, "search": search}
+	coordinates = []
+	for row in cursor:
+		coordinates.append([row['shape_pt_lon'], row['shape_pt_lat']])
 
-	return json_response(sql_query(sql, g.db, params))
+	return {
+		'type': 'Feature',
+		'geometry': { 'type': 'LineString', 'coordinates': coordinates }
+	}
 
-@app.route('/api/<table>/id/<id_value>')
-def route_id(table: str, id_value: str) -> Response:
-	"""Return a GTFS object with the given ID in the given table."""
-	api_assert(table in TABLES, Error.NO_TABLE)
-	api_assert('id' in VERBS[table], Error.NO_VERB)
+###
+### Specialized Routes
+###
 
-	# Remove trailing 's' on table name and append '_id' to create a string
-	# with the id column name. This is somewhat of a hack but it satisifies the
-	# GTFS spec
-	id_field = table.rstrip('s') + '_id'
-	sql = f"SELECT * FROM {table} WHERE {id_field} = :id"
-	params = {"id": id_value}
+@app.route('/api')
+def route_api() -> Response:
+	""" Indicate whether the API is running """
+	return json_response({'success': 'API Running'})
 
-	return json_response(sql_query(sql, g.db, params))
+@app.route('/api/info')
+def route_api_info() -> Response:
+	""" Return miscellenaous information about the API """
+	min_date = sql_query('SELECT min(start_date) as min_date FROM calendar UNION SELECT min(date) as min_date FROM calendar_dates ORDER BY min_date LIMIT 1', g.db)[0]['min_date']
+	max_date = sql_query('SELECT max(end_date) as max_date FROM calendar UNION SELECT max(date) as max_date FROM calendar_dates ORDER BY max_date DESC LIMIT 1', g.db)[0]['max_date']
+	avg_stop_location = sql_query('SELECT avg(stop_lat) AS lat, avg(stop_lon) AS lon FROM stops', g.db)[0]
+
+	return json_response({
+		'service_date_range': [min_date, max_date],
+		'default_location': {'lat': avg_stop_location['lat'], 'lon': avg_stop_location['lon'] },
+		'max_page_size': app.config['MAX_PAGE_SIZE']
+	})
 
 @app.route('/api/stops/list')
 def route_stops_list() -> Response:
@@ -219,48 +229,9 @@ def route_routes_list() -> Response:
 	sql = 'SELECT route_id, route_short_name, route_long_name FROM routes ORDER BY route_short_name, route_long_name'
 	return json_response(sql_query(sql, g.db))
 
-@app.route('/api/<table>/list')
-def route_list(table) -> Response:
-	"""Return a list of entries in the given GTFS table."""
-	api_assert(table in TABLES, Error.NO_TABLE)
-	api_assert('list' in VERBS[table], Error.NO_VERB)
-
-	(count, page) = get_list_params()
-
-	params = {"limit": count, "offset": page * count}
-	sql = f"SELECT * FROM {table} LIMIT :limit OFFSET :offset"
-
-	return json_response(sql_query(sql, g.db, params))
-
-@app.route('/api/<table>')
-def route_table(table) -> Response:
-	"""Return API and database related metadata for the given GTFS table."""
-	api_assert(table in TABLES, Error.NO_TABLE)
-
-	row_count = sql_query(f"SELECT MAX(_ROWID_) AS row_count FROM {table}", g.db)[0]
-	schema = sql_query(f"PRAGMA table_info({table})", g.db)[0]
-
-	return json_response({
-		'name' : table,
-		'verbs' : VERBS[table],
-		'row_count': row_count,
-		'schema': schema
-	})
-
-@app.route('/api/<table>/fetch')
-def route_fetch(table) -> Response:
-	"""Return the entire contents of a GTFS table."""
-	api_assert(table in TABLES, Error.NO_TABLE)
-	api_assert('fetch' in VERBS[table], Error.NO_VERB)
-
-	sql = f"SELECT * FROM {table}"
-	return json_response(sql_query(sql, g.db)[0])
-
-@app.route('/api/<table>/locate')
-def route_locate(table) -> Response:
-	"""Locate GTFS objects within the given geographical bounds."""
-	api_assert(table in TABLES, Error.NO_TABLE)
-	api_assert('locate' in VERBS[table], Error.NO_VERB)
+@app.route('/api/stops/locate')
+def route_stops_locate() -> Response:
+	"""Locate stops within the given geographical bounds."""
 
 	for param in ['high_lat', 'low_lat', 'high_lon', 'low_lon']:
 		api_assert(param in request.args, Error.NO_PARAM(param))
@@ -275,13 +246,12 @@ def route_locate(table) -> Response:
 		"offset": page * count
 	}
 
-	sql = f'''SELECT * FROM {table}
+	sql = f'''SELECT * FROM stops
 		WHERE stop_lat < :high_lat AND stop_lat > :low_lat
 		AND stop_lon < :high_lon AND stop_lon > :low_lon
 		LIMIT :limit OFFSET :offset'''
 
 	return json_response(sql_query(sql, g.db, params))
-
 
 @app.route('/api/stop_times/<stop_id>/schedule')
 def route_schedule(stop_id) -> Response:
@@ -324,27 +294,6 @@ def route_schedule(stop_id) -> Response:
 	params = {'yyyymmdd': yyyymmdd, 'stop_id': stop_id}
 	return json_response(sql_query(sql, g.db, params))
 
-def create_geojson_feature(shape_id: str) -> typing.Dict:
-	"""Return a GeoJSON Feature object representing the GTFS shape
-	corresponding to the ID."""
-
-	sql = '''SELECT * FROM shapes
-	WHERE shape_id = :shape_id
-	ORDER BY shape_id, shape_pt_sequence'''
-	params = {'shape_id': shape_id}
-
-	cursor = sql_query(sql, g.db, params)
-
-	coordinates = []
-	for row in cursor:
-		coordinates.append([row['shape_pt_lon'], row['shape_pt_lat']])
-
-	return {
-		'type': 'Feature',
-		'geometry': { 'type': 'LineString', 'coordinates': coordinates }
-	}
-
-
 @app.route('/api/route/<route_id>/geojson')
 def route_geojson(route_id) -> Response:
 	"""Return the GeoJSON for a specified route."""
@@ -360,24 +309,77 @@ def route_geojson(route_id) -> Response:
 		'features': [create_geojson_feature(sid['shape_id']) for sid in shape_ids],
 	})
 
+###
+### Generic Routes - Implementations Apply To Multiple Tables
+###
 
-@app.route('/api')
-def route_api() -> Response:
-	""" Indicate whether the API is running """
-	return json_response({'success': 'API Running'})
+@app.route('/api/<table>/find/<search>')
+def route_find(table, search) -> Response:
+	"""Search a GTFS table on all applicable columns and return objects
+	matching the search term."""
+	api_assert(table in TABLES, Error.NO_TABLE)
+	api_assert('find' in VERBS[table], Error.NO_VERB)
 
-@app.route('/api/info')
-def route_api_info() -> Response:
-	""" Return miscellenaous information about the API """
-	min_date = sql_query('SELECT min(start_date) as min_date FROM calendar UNION SELECT min(date) as min_date FROM calendar_dates ORDER BY min_date LIMIT 1', g.db)[0]['min_date']
-	max_date = sql_query('SELECT max(end_date) as max_date FROM calendar UNION SELECT max(date) as max_date FROM calendar_dates ORDER BY max_date DESC LIMIT 1', g.db)[0]['max_date']
-	avg_stop_location = sql_query('SELECT avg(stop_lat) AS lat, avg(stop_lon) AS lon FROM stops', g.db)[0]
+	search_fields = SEARCH_FIELDS[table]
+	where_clause = " OR ".join([f"{sf} LIKE '%'||:search||'%'" for sf in search_fields])
+	sql = f"SELECT * FROM {table} WHERE {where_clause} LIMIT :limit OFFSET :page"
+
+	(count, page) = get_list_params()
+	params = {"limit": count, "offset": page * count, "search": search}
+
+	return json_response(sql_query(sql, g.db, params))
+
+@app.route('/api/<table>/id/<id_value>')
+def route_id(table: str, id_value: str) -> Response:
+	"""Return a GTFS object with the given ID in the given table."""
+	api_assert(table in TABLES, Error.NO_TABLE)
+	api_assert('id' in VERBS[table], Error.NO_VERB)
+
+	# Remove trailing 's' on table name and append '_id' to create a string
+	# with the id column name. This is somewhat of a hack but it satisifies the
+	# GTFS spec
+	id_field = table.rstrip('s') + '_id'
+	sql = f"SELECT * FROM {table} WHERE {id_field} = :id"
+	params = {"id": id_value}
+
+	return json_response(sql_query(sql, g.db, params))
+
+@app.route('/api/<table>/list')
+def route_list(table) -> Response:
+	"""Return a list of entries in the given GTFS table."""
+	api_assert(table in TABLES, Error.NO_TABLE)
+	api_assert('list' in VERBS[table], Error.NO_VERB)
+
+	(count, page) = get_list_params()
+
+	params = {"limit": count, "offset": page * count}
+	sql = f"SELECT * FROM {table} LIMIT :limit OFFSET :offset"
+
+	return json_response(sql_query(sql, g.db, params))
+
+@app.route('/api/<table>')
+def route_table(table) -> Response:
+	"""Return API and database related metadata for the given GTFS table."""
+	api_assert(table in TABLES, Error.NO_TABLE)
+
+	row_count = sql_query(f"SELECT MAX(_ROWID_) AS row_count FROM {table}", g.db)[0]
+	schema = sql_query(f"PRAGMA table_info({table})", g.db)[0]
 
 	return json_response({
-		'service_date_range': [min_date, max_date],
-		'default_location': {'lat': avg_stop_location['lat'], 'lon': avg_stop_location['lon'] },
-		'max_page_size': app.config['MAX_PAGE_SIZE']
+		'name' : table,
+		'verbs' : VERBS[table],
+		'row_count': row_count,
+		'schema': schema
 	})
+
+@app.route('/api/<table>/fetch')
+def route_fetch(table) -> Response:
+	"""Return the entire contents of a GTFS table."""
+	api_assert(table in TABLES, Error.NO_TABLE)
+	api_assert('fetch' in VERBS[table], Error.NO_VERB)
+
+	sql = f"SELECT * FROM {table}"
+	return json_response(sql_query(sql, g.db)[0])
 
 @app.errorhandler(APIError)
 @app.errorhandler(ParamError)
