@@ -4,6 +4,7 @@ import sqlite3
 import json
 import math
 import time
+import typing
 
 ###
 ### Flask Stuff
@@ -13,17 +14,20 @@ from flask import Flask, request, g, Response
 app = Flask(__name__)
 app.config.from_pyfile('config.py')
 
-def get_db():
+def get_db() -> sqlite3.Connection:
+	"""Configure and retrieve the database handle."""
 	conn = sqlite3.connect(app.config['DATABASE'])
 	conn.row_factory = sqlite3.Row
 	return conn
 
 @app.before_request
 def before_request():
+	"""Setup app context globals."""
 	g.db = get_db()
 
 @app.teardown_request
 def teardown_request(exception):
+	"""Close resources at end of request."""
 	if hasattr(g, 'db'):
 		g.db.close()
 
@@ -31,13 +35,15 @@ def teardown_request(exception):
 ### Utils
 ###
 
-def json_response(obj):
+def json_response(obj) -> Response:
+	"""Return a Response whose body is a JSON object."""
 	headers = {}
 	if app.env == 'development':
 		headers = {"Access-Control-Allow-Origin": "*"}
 	return Response(json.dumps(obj), mimetype="application/json", headers=headers)
 
-def error_json_response(message):
+def error_json_response(message: str) -> Response:
+	"""Return a Response whose body is a JSON object indicating an error."""
 	return json_response({"error": message})
 
 ###
@@ -45,18 +51,25 @@ def error_json_response(message):
 ###
 
 class CursorListAdapter(list):
-	""" An object that yields rows from cursor when accessed like a list. This
-	is useful for treating a database query like a list of results while
-	elements are in fact being fetched on-demand by the cursor.
-	"""
-	def __init__(self, cursor):
+	""" An object yielding rows from a cursor when accessed like a list.
+
+	This class is used to treat database queries as a list of results. Results
+	are fetched when this object is accessed like a list via __getitem__. Note
+	this means accesing an index *will cause side-effects* by incrementing the
+	cursor's position. Subsequent list accesses will continue fetching results
+	relative to it."""
+
+	def __init__(self, cursor: sqlite3.Cursor):
+		"""Set the cursor."""
 		self.cursor = cursor
 
 	def __iter__(self):
+		"""Yield rows from the cursor."""
 		for row in self.cursor:
 			yield dict(row)
 
-	def __getitem__(self, n):
+	def __getitem__(self, n: int):
+		"""Fetch the nth row of the cursor, discarding rows before n."""
 		if not type(n) is int:
 			raise TypeError("Index must be an integer")
 
@@ -65,9 +78,10 @@ class CursorListAdapter(list):
 			self.cursor.fetchmany(n)
 
 		# return the immediate next row
-		return dict(self.cursor.fetchone()) 
+		return dict(self.cursor.fetchone())
 
-def sql_query(sql, db, params={}):
+def sql_query(sql: str, db: sqlite3.Connection, params: dict = {}):
+	"""Execute an SQL query and return a CursorListAdapter of the results."""
 	cursor = db.cursor()
 	cursor.execute(sql, params)
 	return CursorListAdapter(cursor)
@@ -107,36 +121,42 @@ SEARCH_FIELDS = {
 }
 
 class APIError(Exception):
+	"""Exception type representing incorrect usage of the API"""
 	pass
 
 class ParamError(Exception):
+	"""Exception type representing incorrect input or query paramaters"""
 	pass
 
-# Holds Error Messages
 class Error:
+	"""Class holding human-readable error messages"""
 	NO_TABLE = "Table does not exist"
 	NO_VERB = "Verb not supported"
 	NO_PARAM = lambda p: "Missing required parameter: " + p
 
-def get_param_numeric(key, type_fn, lower, upper, default):
+def get_param_numeric(key: str, type_fn, lower, upper, default):
+	"""Retrieve a numeric value from a request paramater bounded within a range."""
 	try:
 		value = type_fn(request.args.get(key, default))
 		return max(lower, min(value, upper))
 	except (ValueError, TypeError) as e:
 		raise ParamError("Invalid parameter value: " + str(e))
 
-def api_assert(test, msg):
-	if type(test) is bool and test:
+def api_assert(assertion: bool, msg: str):
+	"""Raise an APIError if the given assertion is false"""
+	if type(assertion) is bool and assertion:
 		return True
 	else:
 		raise APIError(msg)
 
-def get_list_params():
+def get_list_params() -> typing.Tuple:
+	"""Retrieve paramaters for a 'list' API verb and return a tuple"""
 	count = get_param_numeric('count', int, 0, int(app.config['MAX_PAGE_SIZE']), 25)
 	page = get_param_numeric('page', int, 0, float("+inf"), 0)
 	return (count, page)
 
-def get_locate_params():
+def get_locate_params() -> typing.Tuple:
+	"""Retrieve paramaters for a 'locate' API verb and return a tuple"""
 	high_lat = get_param_numeric('high_lat', float, -90.0, 90.0, None)
 	low_lat = get_param_numeric('low_lat', float, -90.0, 90.0, None)
 	high_lon = get_param_numeric('high_lon', float, -180.0, 180.0, None)
@@ -144,7 +164,9 @@ def get_locate_params():
 	return (high_lat, low_lat, high_lon, low_lon)
 
 @app.route('/api/<table>/find/<search>')
-def route_find(table, search):
+def route_find(table, search) -> Response:
+	"""Search a GTFS table on all applicable columns and return objects
+	matching the search term."""
 	api_assert(table in TABLES, Error.NO_TABLE)
 	api_assert('find' in VERBS[table], Error.NO_VERB)
 
@@ -158,7 +180,8 @@ def route_find(table, search):
 	return json_response(sql_query(sql, g.db, params))
 
 @app.route('/api/<table>/id/<id_value>')
-def route_id(table, id_value):
+def route_id(table: str, id_value: str) -> Response:
+	"""Return a GTFS object with the given ID in the given table."""
 	api_assert(table in TABLES, Error.NO_TABLE)
 	api_assert('id' in VERBS[table], Error.NO_VERB)
 
@@ -172,8 +195,8 @@ def route_id(table, id_value):
 	return json_response(sql_query(sql, g.db, params))
 
 @app.route('/api/stops/list')
-def route_stops_list():
-
+def route_stops_list() -> Response:
+	"""Return a list of stops."""
 	route_id = request.args.get('route_id', None)
 	if route_id == None:
 		return route_list('stops')
@@ -191,12 +214,14 @@ def route_stops_list():
 	return json_response(sql_query(sql, g.db, params))
 
 @app.route('/api/routes/list')
-def route_routes_list():
+def route_routes_list() -> Response:
+	"""Return a list of routes."""
 	sql = 'SELECT route_id, route_short_name, route_long_name FROM routes ORDER BY route_short_name, route_long_name'
 	return json_response(sql_query(sql, g.db))
 
 @app.route('/api/<table>/list')
-def route_list(table):
+def route_list(table) -> Response:
+	"""Return a list of entries in the given GTFS table."""
 	api_assert(table in TABLES, Error.NO_TABLE)
 	api_assert('list' in VERBS[table], Error.NO_VERB)
 
@@ -208,7 +233,8 @@ def route_list(table):
 	return json_response(sql_query(sql, g.db, params))
 
 @app.route('/api/<table>')
-def route_table(table):
+def route_table(table) -> Response:
+	"""Return API and database related metadata for the given GTFS table."""
 	api_assert(table in TABLES, Error.NO_TABLE)
 
 	row_count = sql_query(f"SELECT MAX(_ROWID_) AS row_count FROM {table}", g.db)[0]
@@ -222,7 +248,8 @@ def route_table(table):
 	})
 
 @app.route('/api/<table>/fetch')
-def route_fetch(table):
+def route_fetch(table) -> Response:
+	"""Return the entire contents of a GTFS table."""
 	api_assert(table in TABLES, Error.NO_TABLE)
 	api_assert('fetch' in VERBS[table], Error.NO_VERB)
 
@@ -230,7 +257,8 @@ def route_fetch(table):
 	return json_response(sql_query(sql, g.db)[0])
 
 @app.route('/api/<table>/locate')
-def route_locate(table):
+def route_locate(table) -> Response:
+	"""Locate GTFS objects within the given geographical bounds."""
 	api_assert(table in TABLES, Error.NO_TABLE)
 	api_assert('locate' in VERBS[table], Error.NO_VERB)
 
@@ -256,7 +284,8 @@ def route_locate(table):
 
 
 @app.route('/api/stop_times/<stop_id>/schedule')
-def route_schedule(stop_id):
+def route_schedule(stop_id) -> Response:
+	"""Return schedule information for the specified stop."""
 	yyyymmdd = request.args.get('date', None)
 	if yyyymmdd is None:
 		return json_response([])
@@ -295,7 +324,10 @@ def route_schedule(stop_id):
 	params = {'yyyymmdd': yyyymmdd, 'stop_id': stop_id}
 	return json_response(sql_query(sql, g.db, params))
 
-def create_geojson_feature(shape_id):
+def create_geojson_feature(shape_id: str) -> typing.Dict:
+	"""Return a GeoJSON Feature object representing the GTFS shape
+	corresponding to the ID."""
+
 	sql = '''SELECT * FROM shapes
 	WHERE shape_id = :shape_id
 	ORDER BY shape_id, shape_pt_sequence'''
@@ -314,7 +346,8 @@ def create_geojson_feature(shape_id):
 
 
 @app.route('/api/route/<route_id>/geojson')
-def route_geojson(route_id):
+def route_geojson(route_id) -> Response:
+	"""Return the GeoJSON for a specified route."""
 	api_assert('shapes' in TABLES, Error.NO_TABLE)
 
 	sql = 'SELECT DISTINCT shape_id FROM trips WHERE route_id = :route_id'
@@ -329,11 +362,13 @@ def route_geojson(route_id):
 
 
 @app.route('/api')
-def route_api():
+def route_api() -> Response:
+	""" Indicate whether the API is running """
 	return json_response({'success': 'API Running'})
 
 @app.route('/api/info')
-def route_api_info():
+def route_api_info() -> Response:
+	""" Return miscellenaous information about the API """
 	min_date = sql_query('SELECT min(start_date) as min_date FROM calendar UNION SELECT min(date) as min_date FROM calendar_dates ORDER BY min_date LIMIT 1', g.db)[0]['min_date']
 	max_date = sql_query('SELECT max(end_date) as max_date FROM calendar UNION SELECT max(date) as max_date FROM calendar_dates ORDER BY max_date DESC LIMIT 1', g.db)[0]['max_date']
 	avg_stop_location = sql_query('SELECT avg(stop_lat) AS lat, avg(stop_lon) AS lon FROM stops', g.db)[0]
@@ -346,5 +381,5 @@ def route_api_info():
 
 @app.errorhandler(APIError)
 @app.errorhandler(ParamError)
-def handle_error(error):
+def handle_error(error: Exception) -> Response:
 	return error_json_response(str(error))
