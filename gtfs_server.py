@@ -93,7 +93,7 @@ def sql_query(sql: str, db: sqlite3.Connection, params: dict = {}):
 # dict of gtfs tables and their supported API verbs/actions
 VERBS = {
 	'agency': ['id', 'list'],
-	'stops': ['id', 'list', 'find', 'locate'],
+	'stops': ['id', 'list', 'find', 'locate', 'nearby'],
 	'routes': ['id', 'list', 'find'],
 	'trips': ['id'],
 	'stop_times': ['list', 'find', 'schedule'],
@@ -162,6 +162,12 @@ def get_locate_params() -> typing.Tuple:
 	high_lon = get_param_numeric('high_lon', float, -180.0, 180.0, None)
 	low_lon = get_param_numeric('low_lon', float, -180.0, 180.0, None)
 	return (high_lat, low_lat, high_lon, low_lon)
+
+def get_nearby_params() -> typing.Tuple:
+	"""Retrieve paramaters for a 'nearby' API verb and return a tuple"""
+	lat = get_param_numeric('lat', float, -90.0, 90.0, None)
+	lon = get_param_numeric('lon', float, -180.0, 180.0, None)
+	return (lat, lon)
 
 def create_geojson_feature(shape_id: str) -> typing.Dict:
 	"""Return a GeoJSON Feature object representing the GTFS shape
@@ -249,6 +255,29 @@ def route_stops_locate() -> Response:
 	sql = f'''SELECT * FROM stops
 		WHERE stop_lat < :high_lat AND stop_lat > :low_lat
 		AND stop_lon < :high_lon AND stop_lon > :low_lon
+		LIMIT :limit OFFSET :offset'''
+
+	return json_response(sql_query(sql, g.db, params))
+
+@app.route('/api/stops/nearby')
+def route_stops_nearby() -> Response:
+	"""Locate stops nearby ordered by proximity to the given coordinate"""
+
+	for param in ['lat', 'lon']:
+		api_assert(param in request.args, Error.NO_PARAM(param))
+
+	(lat, lon) = get_nearby_params()
+	(count, page) = get_list_params()
+
+	params = {
+		'lat': lat,
+		'lon': lon,
+		'limit': count,
+		'offset': page * count
+	}
+
+	sql = '''SELECT * FROM stops
+		ORDER BY ABS(stop_lat - :lat) + ABS(stop_lon - :lon)
 		LIMIT :limit OFFSET :offset'''
 
 	return json_response(sql_query(sql, g.db, params))
